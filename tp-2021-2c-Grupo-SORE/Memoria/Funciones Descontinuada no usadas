@@ -1,0 +1,205 @@
+void pisarEnMemoriaPrinsipal(void *contenido, t_list *paginas)
+{
+	int cantidadPaginas = list_size(paginas);
+	int desplazamiento = 0;
+	log_info(logger, "Comienza el remplazao de marcos");
+	for (int i = 0; i < cantidadPaginas; i++)
+	{
+		Pagina *pagina = list_get(paginas, i);
+		Marco *marco = list_get(listaDeMarcos, pagina->marco);
+		memcpy(marco->marco, contenido + desplazamiento, pagina->size);
+		desplazamiento += pagina->size;
+		log_info(logger, "PAgina %d size a pisa %d", i, pagina->size);
+	}
+}
+
+void escribirEnMemoria(void *aEscribir, uint32_t tamanioTotal,
+					   uint32_t tamanioCont, char *contenido, uint32_t desplazamiento)
+{
+	int recorrido = 0;
+	HeapMetadata *metadata = aEscribir + (desplazamiento - sizeof(HeapMetadata));
+
+	log_info(logger, "HeapMetadata prev %d ", metadata->prevAlloc);
+
+	log_info(logger, "HeapMetadata sig %d ", metadata->nextAlloc);
+
+	if ((metadata->nextAlloc - desplazamiento) < tamanioCont)
+	{
+		log_info(logger, "Alloc_segment_fault");
+	}
+	else
+	{
+		memcpy(aEscribir + desplazamiento, contenido + recorrido, tamanioCont);
+		log_info(logger, "Escritura realizada con exito");
+		/*
+		 while (recorrido != tamanioCont) {
+		 if ((tamanioCont - recorrido) < metadata->nextAlloc) {
+		 memcpy(aEscribir + desplazamiento, contenido + recorrido,
+		 tamanioCont - recorrido);
+		 recorrido += tamanioCont - recorrido;
+		 } else {
+		 memcpy(aEscribir + desplazamiento, contenido + recorrido,
+		 metadata->nextAlloc - sizeof(HeapMetadata));
+		 recorrido += metadata->nextAlloc - sizeof(HeapMetadata);
+		 desplazamiento += metadata->nextAlloc - sizeof(HeapMetadata);
+		 metadata = aEscribir + desplazamiento;
+		 desplazamiento += sizeof(HeapMetadata);
+		 }
+
+		 }
+		 */
+	}
+}
+
+void *juntarContenidoMemoria(t_list *paginas, uint32_t tamanioTotal)
+{
+	int cantidadPaginas = list_size(paginas);
+	void *contenidoMem = malloc(cantidadPaginas * tamanioPagina);
+	int desplazamiento = 0;
+	for (int i = 0; i < cantidadPaginas; i++)
+	{
+		void *marco = ptr_marco(i, paginas);
+		memcpy(contenidoMem + desplazamiento, marco, tamanioPagina);
+		desplazamiento += tamanioPagina;
+	}
+	log_info(logger, "Tamanio Total de los marcos juntos %d", desplazamiento);
+	return contenidoMem;
+}
+
+void *retornarContenido(t_list *paginas, uint32_t tamanioTotal,
+						int *tamanioEnviar, uint32_t dirLog)
+{
+
+	void *contenido = juntarContenidoPaginasAlloc(paginas, dirLog,
+												  tamanioEnviar);
+
+	HeapMetadata *metadata = contenido + (dirLog - sizeof(HeapMetadata));
+	log_info(logger, "HeapMetadata prev %d ", metadata->prevAlloc);
+	log_info(logger, "HeapMetadata sig %d ", metadata->nextAlloc);
+
+	void *aEnviar = malloc(
+		metadata->nextAlloc - (dirLog + sizeof(HeapMetadata)));
+
+	memcpy(aEnviar, contenido + dirLog,
+		   metadata->nextAlloc - (dirLog + sizeof(HeapMetadata)));
+
+	log_info(logger, "Tamanio a Enviar lectura %d",
+			 metadata->nextAlloc - (dirLog + sizeof(HeapMetadata)));
+
+	(*tamanioEnviar) = metadata->nextAlloc - (dirLog + sizeof(HeapMetadata));
+
+	return aEnviar;
+}
+void concretarElPageFault(uint32_t pid, uint32_t dirLog)
+{
+	log_info(logger, "Falta pagina en memoria");
+	uint16_t paginaVictima;
+	uint32_t pidVictima;
+	AdmProceso *proceso = buscarCarpincho(pid);
+
+	void *ptr_Marco;
+
+	if (string_equals_ignore_case("FIJA", tipoAsignacion) == 0)
+	{
+		ptr_Marco = realizarSwapLocal(buscarCarpincho(pid), &paginaVictima,
+									  &pidVictima, obtenerDeterminadaPagina(dirLog));
+	}
+	else
+	{
+		ptr_Marco = realizarSwapGlobal(proceso->tablaDePaginas, &paginaVictima,
+									   &pidVictima, obtenerDeterminadaPagina(dirLog),pid);
+	}
+
+	void *aSwapear = malloc(tamanioPagina);
+
+	memcpy(aSwapear, ptr_Marco, tamanioPagina);
+
+	void *aPisar = analizarTipoPageFault(paginaVictima, pidVictima,
+										 obtenerDeterminadaPagina(dirLog), pid, aSwapear);
+
+	memcpy(ptr_Marco, aPisar, tamanioPagina);
+}
+void *juntarContenidoPaginasAlloc(t_list *paginas, uint32_t alloc,
+								  int *tamanioAenviar)
+{
+	int resto = obtenerResto(alloc);
+	log_info(logger, "Resto %d ", resto);
+	log_info(logger, "Direccion Logica %d ", alloc);
+	log_info(logger, "Pagina %d ", obtenerDeterminadaPagina(alloc));
+
+	void *marco = ptr_marco(obtenerDeterminadaPagina(alloc), paginas);
+
+	HeapMetadata *inicial;
+	if (resto < sizeof(HeapMetadata))
+	{
+
+		inicial = entreDosPaginas(alloc, paginas);
+	}
+	else
+	{
+		inicial = marco + (resto - sizeof(HeapMetadata));
+	}
+
+	log_info(logger, "HeapMetadata prev %d ", inicial->prevAlloc);
+
+	log_info(logger, "HeapMetadata sig %d ", inicial->nextAlloc);
+
+	void *marcos = malloc(
+		tamanioPagina * (cantidadPaginas(inicial->nextAlloc) - cantidadPaginas(alloc) + 1));
+
+	void *contenido = malloc(inicial->nextAlloc - inicial->prevAlloc);
+
+	if (obtenerDeterminadaPagina(alloc) == obtenerDeterminadaPagina(inicial->nextAlloc))
+	{
+		memcpy(contenido, marco + resto, inicial->nextAlloc - alloc);
+		(*tamanioAenviar) = inicial->nextAlloc - alloc;
+		return contenido;
+	}
+	else
+	{
+
+		int desplazamiento = 0;
+		for (int i = obtenerDeterminadaPagina(alloc);
+			 i <= obtenerDeterminadaPagina(inicial->nextAlloc); i++)
+		{
+			Pagina *aux = list_get(paginas, i);
+			Marco *encontrado = list_get(listaDeMarcos, aux->marco);
+			memcpy(marcos + desplazamiento, encontrado->marco, tamanioPagina);
+			desplazamiento += tamanioPagina;
+		}
+		memcpy(contenido, marcos + resto,
+			   inicial->nextAlloc - inicial->prevAlloc);
+		free(marcos);
+		(*tamanioAenviar) = inicial->nextAlloc - (alloc + sizeof(HeapMetadata));
+		return contenido;
+	}
+}
+
+/*
+ int encontrarUnaVictimaGlobalLRU() {
+ int marcoElegido = list_remove(globalLRU, 0);
+ Pagina* victimaGlobal = buscarVictimaGlobal(marcoElegido);
+
+ victimaGlobal->bitPresencia = false;
+ list_add(globalLRU, marcoElegido);
+ return marcoElegido;
+ }
+
+ Pagina* buscarVictimaGlobal(int *marco,uint16_t *paginaVictima,uint32_t *pidVictima) {
+ bool encontrarReferenciaMarco(void* aComparar) {
+ TLB* elegida = aComparar;
+ return elegida->marco == *marco;
+ }
+ TLB* buscada=list_find(registroTLB,encontrarReferenciaMarco);
+ paginaVictima=buscada->pagina;
+ pidVictima=buscada->id;
+
+ AdmProceso*proceso = list_get(listaDeProcesos, buscada->id);
+ Pagina* victima = list_get(proceso->tablaDePaginas,buscada->pagina);
+
+
+ return victima;
+ }
+ */
+
+
